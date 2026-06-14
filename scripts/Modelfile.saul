@@ -1,0 +1,17 @@
+# Ollama Modelfile for SaulLM-7B-Instruct (legal LLM, Mistral-7B base).
+# 1. Download a GGUF (see scripts/setup_saul.sh) into this folder.
+# 2. ollama create saul-7b-instruct -f scripts/Modelfile.saul
+#
+# Adjust FROM to match the GGUF filename you downloaded.
+FROM ./saul-7b-instruct.Q4_K_M.gguf
+
+PARAMETER temperature 0.2
+PARAMETER top_p 0.9
+PARAMETER num_ctx 8192
+
+# Mistral-instruct chat template.
+TEMPLATE """{{ if .System }}<s>[INST] {{ .System }}
+
+{{ .Prompt }} [/INST]{{ else }}<s>[INST] {{ .Prompt }} [/INST]{{ end }}"""
+
+SYSTEM """You are a careful legal assistant specialised in the Constitution of India. You prioritise provided context, cite Articles precisely, and never fabricate citations."""
