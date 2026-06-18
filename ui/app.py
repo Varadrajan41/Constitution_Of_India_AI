@@ -27,10 +27,19 @@ def show_rewritten(original: str, search_query: str):
         st.caption(f"Rewritten for retrieval: _{search_query}_")
 
 
-def render_answer(text, passages, search_query=None, user_question=None):
+def render_answer(text, passages, search_query=None, user_question=None,
+                  critic_meta=None):
     """Render an assistant answer with fallback warning, sources, and passages."""
     if user_question and search_query:
         show_rewritten(user_question, search_query)
+    if critic_meta and critic_meta.get("enabled"):
+        if critic_meta.get("fallback"):
+            st.caption("Critic: replaced answer — removed ungrounded Article citations.")
+        elif critic_meta.get("rewrites"):
+            st.caption(
+                f"Critic: revised answer ({critic_meta['rewrites']} pass) to remove "
+                f"ungrounded citations."
+            )
     if "general knowledge (not in retrieved text" in text.lower():
         st.warning(
             "This answer includes general knowledge not found in the retrieved "
@@ -55,6 +64,10 @@ with st.sidebar:
     rerank_on = st.toggle("Rerank (cross-encoder)", value=config.RERANK_ENABLED,
                           help=config.RERANKER_MODEL)
     config.RERANK_ENABLED = rerank_on
+    critic_on = st.toggle("Citation critic", value=config.CRITIC_ENABLED,
+                          help="Rewrite answers that cite Articles absent from "
+                               "retrieved passages.")
+    config.CRITIC_ENABLED = critic_on
     strategy = st.radio(
         "Single-collection strategy (when hybrid is off)",
         options=["structured", "naive"],
@@ -83,6 +96,7 @@ for i, turn in enumerate(st.session_state.history):
                 turn.get("passages", []),
                 search_query=turn.get("search_query"),
                 user_question=user_q,
+                critic_meta=turn.get("critic_meta"),
             )
 
 # Starter prompts (only on an empty chat).
@@ -103,20 +117,21 @@ if question:
     with st.chat_message("assistant"):
         prior = st.session_state.history[:-1]  # history excluding the new question
         try:
-            with st.spinner("Retrieving, reranking..."):
-                stream, passages, search_query = rag.answer_stream(
+            with st.spinner("Retrieving, drafting, checking citations..."):
+                stream, passages, search_query, critic_meta = rag.answer_stream(
                     question, hybrid=hybrid, strategy=strategy, history=prior
                 )
             text = st.write_stream(stream)
         except Exception as exc:  # surface setup issues in the UI
-            text, passages, search_query = f"**Error:** {exc}", [], question
+            text, passages, search_query, critic_meta = f"**Error:** {exc}", [], question, {}
             st.markdown(text)
-        render_answer(text, passages, search_query, question)
+        render_answer(text, passages, search_query, question, critic_meta)
     st.session_state.history.append(
         {
             "role": "assistant",
             "content": text,
             "passages": passages,
             "search_query": search_query,
+            "critic_meta": critic_meta,
         }
     )

@@ -71,6 +71,12 @@ QUERY_REWRITE = os.getenv("QUERY_REWRITE", "1") not in ("0", "false", "False")
 # How many recent chat messages to feed the rewriter and the answer prompt.
 CHAT_HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
 
+# --- Critic (citation faithfulness) ----------------------------------------
+# After generation, rewrite answers that cite Articles absent from retrieved
+# passages (max CRITIC_MAX_REWRITES attempts, then a safe fallback).
+CRITIC_ENABLED = os.getenv("CRITIC_ENABLED", "1") not in ("0", "false", "False")
+CRITIC_MAX_REWRITES = int(os.getenv("CRITIC_MAX_REWRITES", "2"))
+
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 

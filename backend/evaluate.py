@@ -89,27 +89,15 @@ def ranked_metas(question, cfg, k, client, ef):
 
 
 def _build_article_index():
-    """Map character ranges -> Article number using the structured article spans.
+    from backend.citations import build_article_index
 
-    This lets us score ANY chunk (including naive windows, which carry no article
-    metadata) by *where it falls* in the document, so the strategies are judged
-    on equal footing.
-    """
-    from backend.extract import extract
-    from backend import chunkers
-
-    spans = []
-    for c in chunkers.structured_chunks(extract()):
-        if c.metadata.get("type") == "article" and c.metadata.get("article"):
-            spans.append((c.metadata["article"], c.start, c.end))
-    return spans
+    return build_article_index()
 
 
 def _articles_in(span, index):
-    cs, ce = span
-    if cs is None or ce is None:
-        return set()
-    return {num for num, s, e in index if min(ce, e) - max(cs, s) > 0}
+    from backend.citations import articles_in_span
+
+    return articles_in_span(span, index)
 
 
 def _first_hit_rank(metas, expected, index):
@@ -171,9 +159,8 @@ def evaluate(k=10, verbose=False):
 # generated answers with deterministic metrics, stores full transcripts, and
 # optionally adds an LLM-as-judge score.
 # --------------------------------------------------------------------------
-_CITE_RE = re.compile(
-    r"[Aa]rticles?\s+((?:\d{1,3}[A-Z]{0,2})(?:\s*(?:,|and|&|to|/)\s*\d{1,3}[A-Z]{0,2})*)"
-)
+from backend.citations import cited_articles, grounded_articles
+
 _ABSTAIN_MARKERS = (
     "general knowledge (not in retrieved",
     "not explicitly",
@@ -200,24 +187,8 @@ Respond with ONLY compact JSON, no prose:
 {{"correctness": <1-5>, "grounded": <1-5>, "rationale": "<one short sentence>"}}"""
 
 
-def _cited_articles(text):
-    out = set()
-    for m in _CITE_RE.finditer(text):
-        out.update(re.findall(r"\d{1,3}[A-Z]{0,2}", m.group(1)))
-    return out
-
-
 def _retrieved_articles(passages, index):
-    """Articles considered 'grounded': a passage's own article id (by position)
-    AND any article numbers cross-referenced inside the passage text (e.g. Art 368
-    enumerates 54/55/73; Art 359 mentions 20/21). Without the latter, legitimate
-    in-text references look like hallucinations.
-    """
-    arts = set()
-    for doc, meta, _ in passages:
-        arts |= _articles_in((meta.get("char_start"), meta.get("char_end")), index)
-        arts |= _cited_articles(doc)
-    return arts
+    return grounded_articles(passages, index)
 
 
 def _abstained(text):
@@ -266,12 +237,12 @@ def evaluate_answers(k=None, judge_model=None):
 
     for item in questions:
         try:
-            answer_text, passages, _ = rag.answer(item["q"])
+            answer_text, passages, _, _ = rag.answer(item["q"])
         except RuntimeError as exc:
             raise SystemExit(str(exc))
 
         expected = set(item.get("articles") or [])
-        cited = _cited_articles(answer_text)
+        cited = cited_articles(answer_text)
         retrieved_arts = _retrieved_articles(passages, index)
         kind = item.get("kind", "factual")
 

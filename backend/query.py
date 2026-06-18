@@ -59,12 +59,14 @@ def build_context(passages) -> str:
     return "\n\n".join(parts)
 
 
-def get_passages(question: str, hybrid: bool = None, strategy: str = None):
+def get_passages(search_query: str, hybrid: bool = None, strategy: str = None):
     """Return passages as list of (doc, meta, score)."""
     use_hybrid = config.HYBRID if hybrid is None else hybrid
     if use_hybrid:
-        return retrieve.retrieve(question)
-    docs, metas = retrieve.single_retrieve(question, strategy)
+        return retrieve.retrieve(search_query)
+    docs, metas = retrieve.single_retrieve(
+        search_query, strategy, n_results=config.TOP_N
+    )
     return [(d, m, 0.0) for d, m in zip(docs, metas)]
 
 
@@ -142,56 +144,73 @@ def query_was_rewritten(original: str, search_query: str) -> bool:
 
 
 def _prepare(question, hybrid, strategy, history):
-    """Rewrite -> retrieve -> build prompt. Shared by answer/answer_stream
-    (and, later, the critic). Returns (messages, passages, search_query)."""
+    """Rewrite -> retrieve -> build prompt."""
     search_query = rewrite_query(question, history)
     passages = get_passages(search_query, hybrid=hybrid, strategy=strategy)
     messages = _build_messages(question, build_context(passages), history)
     return messages, passages, search_query
 
 
-def answer(question: str, hybrid: bool = None, strategy: str = None, history=None):
-    """Return (answer_text, passages, search_query).
-
-    search_query is the query sent to retrieval (after optional rewrite).
-    """
+def _generate_draft(client, messages):
     import ollama
 
-    messages, passages, search_query = _prepare(question, hybrid, strategy, history)
-    client = ollama.Client(host=config.OLLAMA_HOST)
     try:
         response = client.chat(model=config.OLLAMA_MODEL, messages=messages)
     except ollama.ResponseError as exc:
         raise (_model_error(exc) or exc) from None
-    return response["message"]["content"], passages, search_query
+    return response["message"]["content"]
+
+
+def _finalize_answer(client, draft, passages, question):
+    from backend.critic import apply_critic
+
+    return apply_critic(client, draft, passages, question)
+
+
+def _stream_text(text: str):
+    """Yield text in word-sized chunks for a typing effect after critic approval."""
+    if not text:
+        return
+    parts = text.split(" ")
+    for i, word in enumerate(parts):
+        yield word if i == 0 else " " + word
+
+
+def answer(question: str, hybrid: bool = None, strategy: str = None, history=None):
+    """Return (answer_text, passages, search_query, critic_meta)."""
+    import ollama
+
+    messages, passages, search_query = _prepare(question, hybrid, strategy, history)
+    client = ollama.Client(host=config.OLLAMA_HOST)
+    draft = _generate_draft(client, messages)
+    text, critic_meta = _finalize_answer(client, draft, passages, question)
+    return text, passages, search_query, critic_meta
 
 
 def answer_stream(question: str, hybrid: bool = None, strategy: str = None,
                   history=None):
-    """Streaming variant. Returns (token_generator, passages, search_query).
+    """Returns (token_generator, passages, search_query, critic_meta)."""
+    import ollama
 
-    Retrieval/rewrite happen eagerly (so passages are known up front); only the
-    LLM generation is streamed. Structured so a critic can later consume the
-    non-streaming `answer()` for a draft and stream only the approved result.
-    """
     messages, passages, search_query = _prepare(question, hybrid, strategy, history)
+    client = ollama.Client(host=config.OLLAMA_HOST)
+    draft = _generate_draft(client, messages)
+    text, critic_meta = _finalize_answer(client, draft, passages, question)
+    return _stream_text(text), passages, search_query, critic_meta
 
-    def _tokens():
-        import ollama
 
-        client = ollama.Client(host=config.OLLAMA_HOST)
-        try:
-            for chunk in client.chat(
-                model=config.OLLAMA_MODEL, messages=messages, stream=True
-            ):
-                yield chunk["message"]["content"]
-        except ollama.ResponseError as exc:
-            err = _model_error(exc)
-            if err is None:
-                raise
-            yield f"\n\n**Setup needed:** {err}"
-
-    return _tokens(), passages, search_query
+def _print_critic(critic_meta: dict):
+    if not critic_meta or not critic_meta.get("enabled"):
+        return
+    bad = critic_meta.get("ungrounded") or []
+    fixed = critic_meta.get("fixed_ungrounded") or bad
+    rewrites = critic_meta.get("rewrites", 0)
+    if critic_meta.get("fallback"):
+        print(f"  critic: fallback (removed ungrounded {fixed})")
+    elif rewrites:
+        print(f"  critic: {rewrites} rewrite(s) (fixed ungrounded {fixed})")
+    elif bad:
+        print(f"  critic: ungrounded {bad}")
 
 
 def _print_rewritten(original: str, search_query: str):
@@ -214,10 +233,13 @@ def main():
     parser.add_argument("--strategy", choices=["naive", "structured"],
                         default=config.DEFAULT_STRATEGY)
     parser.add_argument("--show", action="store_true", help="Print retrieved passages.")
+    parser.add_argument("--no-critic", action="store_true", help="Disable citation critic.")
     args = parser.parse_args()
 
     if args.no_rerank:
         config.RERANK_ENABLED = False
+    if args.no_critic:
+        config.CRITIC_ENABLED = False
     hybrid = not args.no_hybrid
 
     mode = "hybrid+rerank" if (hybrid and config.RERANK_ENABLED) else (
@@ -233,13 +255,14 @@ def main():
         if not question:
             continue
         try:
-            text, passages, search_query = answer(
+            text, passages, search_query, critic_meta = answer(
                 question, hybrid=hybrid, strategy=args.strategy, history=history
             )
         except RuntimeError as exc:
             print(f"\n[setup needed]\n{exc}")
             break
         _print_rewritten(question, search_query)
+        _print_critic(critic_meta)
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": text})
         if args.show:

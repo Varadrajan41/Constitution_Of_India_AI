@@ -14,11 +14,17 @@ from __future__ import annotations
 
 from backend import config
 
+_chroma_client = None
+
 
 def _client():
-    import chromadb
+    """Reuse one PersistentClient — Chroma's shared system is not thread-safe."""
+    global _chroma_client
+    if _chroma_client is None:
+        import chromadb
 
-    return chromadb.PersistentClient(path=str(config.CHROMA_DIR))
+        _chroma_client = chromadb.PersistentClient(path=str(config.CHROMA_DIR))
+    return _chroma_client
 
 
 def _collection(client, strategy: str):
@@ -80,6 +86,26 @@ def hybrid_candidates(question: str, k: int = None):
     return cands
 
 
+def _select_top(ranked, top_n: int = None):
+    """Apply rerank score floor + span dedupe."""
+    top_n = top_n or config.TOP_N
+    top_score = ranked[0][2] if ranked else 0.0
+    floor = max(config.RERANK_MIN_SCORE, config.RERANK_KEEP_RATIO * top_score)
+
+    selected = []
+    for doc, meta, score in ranked:
+        if config.RERANK_ENABLED and selected and score < floor:
+            continue
+        span = (meta.get("char_start"), meta.get("char_end"))
+        if any(_spans_overlap(span, (m.get("char_start"), m.get("char_end")))
+               for _, m, _ in selected):
+            continue
+        selected.append((doc, meta, score))
+        if len(selected) >= top_n:
+            break
+    return selected
+
+
 def retrieve(question: str, top_n: int = None):
     """Full hybrid + rerank retrieval. Returns list of (doc, meta, score)."""
     from backend.rerank import rerank
@@ -93,20 +119,4 @@ def retrieve(question: str, top_n: int = None):
     else:
         ranked = [(d, m, 0.0) for d, m in cands]
 
-    # Relevance floor (only meaningful when reranking). The top passage is always
-    # kept; the rest must clear both an absolute and a relative-to-top bar.
-    top_score = ranked[0][2] if ranked else 0.0
-    floor = max(config.RERANK_MIN_SCORE, config.RERANK_KEEP_RATIO * top_score)
-
-    selected = []
-    for doc, meta, score in ranked:
-        if config.RERANK_ENABLED and selected and score < floor:
-            continue
-        span = (meta.get("char_start"), meta.get("char_end"))
-        if any(_spans_overlap(span, (m.get("char_start"), m.get("char_end")))
-               for _, m, _ in selected):
-            continue
-        selected.append((doc, meta, score))
-        if len(selected) >= (top_n or config.TOP_N):
-            break
-    return selected
+    return _select_top(ranked, top_n)
