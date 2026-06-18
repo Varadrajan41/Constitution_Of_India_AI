@@ -125,11 +125,20 @@ def evaluate(k=10, verbose=False):
     from backend.embeddings import BGEEmbeddingFunction
 
     questions = _load_questions()
+    # Retrieval metrics only make sense where a gold Article exists. Negative /
+    # no-gold questions have nothing to retrieve, so counting them as misses
+    # deflates Hit@K/MRR/Recall. They are scored separately by the abstention
+    # metric in the --with-llm answer eval.
+    answerable = [
+        q for q in questions if q.get("kind") != "negative" and q.get("articles")
+    ]
+    n_skipped = len(questions) - len(answerable)
     client = _client()
     ef = BGEEmbeddingFunction()
     index = _build_article_index()  # position -> article map (strategy-agnostic)
 
-    print(f"\nEvaluating {len(questions)} questions, K={k}\n")
+    skip_note = f" ({n_skipped} negative/no-gold excluded)" if n_skipped else ""
+    print(f"\nEvaluating {len(answerable)} answerable questions, K={k}{skip_note}\n")
     header = f"{'config':<14}{'Hit@1':>8}{'Hit@3':>8}{'Hit@5':>8}{'MRR':>8}{'Recall@K':>11}"
     print(header)
     print("-" * len(header))
@@ -137,7 +146,7 @@ def evaluate(k=10, verbose=False):
     results = {}
     for name, cfg in CONFIGS:
         ranks = []
-        for item in questions:
+        for item in answerable:
             metas = ranked_metas(item["q"], cfg, k, client, ef)
             rank = _first_hit_rank(metas, item["articles"], index)
             ranks.append(rank)

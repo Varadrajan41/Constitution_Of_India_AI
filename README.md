@@ -55,9 +55,23 @@ retrieved text - verify):` and never with fabricated citations.
 
 ## Results
 
-Answer-level eval over **34 labeled questions** (factual / scenario / negative),
-with `qwen2.5:7b-instruct` both answering and judging, embeddings + reranker on
-CUDA:
+**Retrieval quality** (`python -m backend.evaluate`, retrieval-only, deterministic,
+no LLM) over the **31 answerable questions** — the 3 negative/no-gold questions are
+excluded here (nothing to retrieve; they're scored by abstention below):
+
+| config        | Hit@1 | Hit@3 | Hit@5 |   MRR | Recall@K |
+|---------------|------:|------:|------:|------:|---------:|
+| structured    |  0.74 |  0.97 |  0.97 | 0.844 |     0.97 |
+| naive         |  0.71 |  0.87 |  0.94 | 0.803 |     0.97 |
+| hybrid        |  0.74 |  0.94 |  0.97 | 0.833 |     1.00 |
+| **hybrid+rr** | **0.94** | **1.00** | **1.00** | **0.968** | **1.00** |
+
+The cross-encoder reranker lifts Hit@1 from 0.74 to **0.94** and MRR to **0.968**;
+hybrid retrieval pushes Recall@K to **1.00** (the naive index backstops anything
+the structured chunker mis-segments).
+
+**Answer quality** (`--with-llm --judge qwen2.5:7b-instruct`, the full production
+pipeline) over all **34 questions** (factual / scenario / negative):
 
 | metric | score |
 |--------|-------|
@@ -68,9 +82,8 @@ CUDA:
 | LLM-judge correctness (1–5) | **4.09** |
 | LLM-judge groundedness (1–5) | **4.62** |
 
-Reproduce with `python -m backend.evaluate --with-llm --judge qwen2.5:7b-instruct`
-(every run writes a full transcript to `eval/runs/`). See [Limitations](#limitations)
-for the one known retrieval edge case.
+Every `--with-llm` run writes a full transcript to `eval/runs/`. See
+[Limitations](#limitations) for the one known retrieval edge case (Article 280).
 
 ## Layout
 
