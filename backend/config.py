@@ -63,6 +63,14 @@ RETRIEVE_K = int(os.getenv("RETRIEVE_K", "20"))   # candidates per collection
 TOP_N = int(os.getenv("TOP_N", "6"))              # passages kept after rerank
 N_RESULTS = int(os.getenv("N_RESULTS", "4"))      # used by single-strategy path
 
+# --- Conversational chat ---------------------------------------------------
+# Rewrite a follow-up into a standalone query (using chat history) before
+# retrieval, so "what about its exceptions?" retrieves the right passages.
+# Only fires when history is present, so single-shot queries are unaffected.
+QUERY_REWRITE = os.getenv("QUERY_REWRITE", "1") not in ("0", "false", "False")
+# How many recent chat messages to feed the rewriter and the answer prompt.
+CHAT_HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
+
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 

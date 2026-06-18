@@ -266,7 +266,7 @@ def evaluate_answers(k=None, judge_model=None):
 
     for item in questions:
         try:
-            answer_text, passages = rag.answer(item["q"])
+            answer_text, passages, _ = rag.answer(item["q"])
         except RuntimeError as exc:
             raise SystemExit(str(exc))
 
