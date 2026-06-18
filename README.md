@@ -12,8 +12,18 @@ query
             └─ merge + dedupe
                  └─ rerank (bge-reranker-v2-m3 cross-encoder)
                       └─ top-N passages
-                           └─ legal LLM (SaulLM-7B) with graded, cited answers
+                           └─ LLM (qwen2.5:7b default · SaulLM-7B optional)
+                                └─ graded, cited answers
 ```
+
+**Highlights**
+
+- **Zero-skip ingestion** — two independent chunkers, both proven 100% coverage.
+- **Hybrid retrieval + cross-encoder rerank** over a naive *and* a structured index.
+- **Graded, cited answers** that quote Articles and label any general-knowledge fallback.
+- **Measured, not vibes** — a 34-question eval harness scoring retrieval *and* answer
+  quality (citation, faithfulness, abstention, LLM-as-judge). See [Results](#results).
+- **Runs out of the box** — the official Constitution PDF is included in `data/`.
 
 ## Two chunking strategies (both indexed)
 
@@ -31,12 +41,36 @@ anything the structured chunker mis-segments; the reranker then picks the best.
 |------|-------|----------|
 | embedding | `BAAI/bge-base-en-v1.5` | sentence-transformers (GPU/CPU) |
 | reranker | `BAAI/bge-reranker-v2-m3` | sentence-transformers CrossEncoder |
-| inference | `SaulLM-7B-Instruct` (legal) | Ollama |
+| inference (default) | `qwen2.5:7b-instruct` | Ollama |
+| inference (optional) | `SaulLM-7B-Instruct` (legal-tuned) | Ollama |
+
+The default inference model is `qwen2.5:7b-instruct` (the one the results below
+were measured with). A legal-tuned alternative, **SaulLM-7B**, can be registered
+via `scripts/setup_saul.sh` and selected with `OLLAMA_MODEL=saul-7b-instruct`.
 
 The inference prompt is **graded**: it answers from the retrieved context and
-cites Articles precisely, and only falls back to the model's own legal knowledge
+cites Articles precisely, and only falls back to the model's own knowledge
 when context is insufficient — clearly labeled `General knowledge (not in
 retrieved text - verify):` and never with fabricated citations.
+
+## Results
+
+Answer-level eval over **34 labeled questions** (factual / scenario / negative),
+with `qwen2.5:7b-instruct` both answering and judging, embeddings + reranker on
+CUDA:
+
+| metric | score |
+|--------|-------|
+| citation hit rate | **0.968** |
+| faithfulness (cited Articles present in retrieved context) | **0.912** |
+| keyword recall | **0.909** |
+| abstention on negative questions | **1.00** |
+| LLM-judge correctness (1–5) | **4.09** |
+| LLM-judge groundedness (1–5) | **4.62** |
+
+Reproduce with `python -m backend.evaluate --with-llm --judge qwen2.5:7b-instruct`
+(every run writes a full transcript to `eval/runs/`). See [Limitations](#limitations)
+for the one known retrieval edge case.
 
 ## Layout
 
@@ -62,20 +96,34 @@ constitution-rag/
 └── .env.example
 ```
 
+## Prerequisites
+
+- **Python 3.10+**
+- **[Ollama](https://ollama.com)** running locally, with an inference model pulled:
+  `ollama pull qwen2.5:7b-instruct`
+- **poppler-utils** for `pdftotext` (e.g. `sudo apt install poppler-utils`).
+  A `pypdf` fallback exists, but poppler gives the cleanest extraction.
+
 ## Setup
 
 ```bash
 cd 05-labs/constitution-rag
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt          # needs poppler-utils for pdftotext
+pip install -r requirements.txt
 cp .env.example .env
-
-# Legal LLM (downloads a GGUF, registers it with Ollama as saul-7b-instruct):
-bash scripts/setup_saul.sh
 ```
 
-> First use also downloads the bge embedding + reranker weights from Hugging Face
+> The official Constitution PDF ships in `data/`, so no download is needed.
+> First use downloads the bge embedding + reranker weights from Hugging Face
 > (~440 MB + ~600 MB). Install a CUDA `torch` build to use your GPU.
+
+**Optional — legal-tuned model.** To use SaulLM-7B instead of qwen, download the
+GGUF and register it with Ollama, then point the app at it:
+
+```bash
+bash scripts/setup_saul.sh                 # creates the saul-7b-instruct model
+export OLLAMA_MODEL=saul-7b-instruct
+```
 
 ## Workflow
 
@@ -138,8 +186,28 @@ answers, metrics, judge notes) to `eval/runs/run_<timestamp>.json` for review.
 - Chunking: `CHUNK_SIZE`, `CHUNK_OVERLAP`, `MAX_ARTICLE_CHARS`.
 - LLM: `OLLAMA_MODEL`, `OLLAMA_HOST`.
 
+## Limitations
+
+- **English only.** The PDF's English text layer is used; the Hindi pages are
+  scanned images and are not ingested (no OCR).
+- **Known retrieval edge case.** For "*which body* recommends distribution of
+  taxes" the embedder favours the tax-distribution Articles (269/270) over the
+  Finance Commission (280), so that one answer can cite a neighbour. Tracked in
+  the eval (it's the single non-clean case in the results above).
+- **Self-judging caveat.** The judge scores above use the same model family that
+  produced the answers; use a different `--judge` model for a stricter signal.
+- Not legal advice — this is a retrieval/IR project over the constitutional text.
+
 ## Notes
 
 - Both collections share one `chroma_db/` and use cosine space.
 - Text extraction is cached to `data/constitution.txt`; use `--force` to rebuild.
 - No OCR: the PDF has a real text layer (English). The Hindi pages are images.
+
+## License
+
+The **code** in this repository is released under the [MIT License](LICENSE).
+The bundled **Constitution of India PDF** is an official publication of the
+Government of India (Ministry of Law and Justice, Legislative Department) and is
+included here only as source data for the RAG pipeline; rights to that text
+remain with its publisher.
