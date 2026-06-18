@@ -63,7 +63,7 @@ RETRIEVE_K = int(os.getenv("RETRIEVE_K", "20"))   # candidates per collection
 TOP_N = int(os.getenv("TOP_N", "6"))              # passages kept after rerank
 N_RESULTS = int(os.getenv("N_RESULTS", "4"))      # used by single-strategy path
 
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "saul-7b-instruct")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 
 
