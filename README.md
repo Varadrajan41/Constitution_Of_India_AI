@@ -6,14 +6,15 @@ Local Retrieval-Augmented Generation over the **official** Constitution of India
 Pipeline:
 
 ```
-query
-  └─ embed (bge-base-en-v1.5)
-       └─ retrieve top-K from BOTH collections (naive + structured)
-            └─ merge + dedupe
-                 └─ rerank (bge-reranker-v2-m3 cross-encoder)
-                      └─ top-N passages
-                           └─ LLM (qwen2.5:7b default · SaulLM-7B optional)
-                                └─ graded, cited answers
+user message (+ optional chat history)
+  └─ query rewrite (follow-ups → standalone retrieval query)
+       └─ embed (bge-base-en-v1.5)
+            └─ hybrid retrieve (naive + structured, top-K each)
+                 └─ merge + dedupe
+                      └─ rerank (bge-reranker-v2-m3 cross-encoder)
+                           └─ top-N passages → graded LLM draft (Ollama)
+                                └─ citation critic (rewrite or safe fallback)
+                                     └─ streamed / displayed answer
 ```
 
 **Highlights**
@@ -21,6 +22,12 @@ query
 - **Zero-skip ingestion** — two independent chunkers, both proven 100% coverage.
 - **Hybrid retrieval + cross-encoder rerank** over a naive *and* a structured index.
 - **Graded, cited answers** that quote Articles and label any general-knowledge fallback.
+- **Conversational chat** — follow-ups like "what are its exceptions?" are rewritten
+  using recent history before retrieval (first message unchanged).
+- **Citation critic** — post-generation faithfulness check; rewrites answers that
+  cite Articles absent from retrieved text, or falls back to a safe excerpt.
+- **Streaming UI** — Streamlit chat with example prompts, clear history, persistent
+  sources and retrieved passages.
 - **Measured, not vibes** — a 34-question eval harness scoring retrieval *and* answer
   quality (citation, faithfulness, abstention, LLM-as-judge). See [Results](#results).
 - **Runs out of the box** — the official Constitution PDF is included in `data/`.
@@ -51,7 +58,30 @@ via `scripts/setup_saul.sh` and selected with `OLLAMA_MODEL=saul-7b-instruct`.
 The inference prompt is **graded**: it answers from the retrieved context and
 cites Articles precisely, and only falls back to the model's own knowledge
 when context is insufficient — clearly labeled `General knowledge (not in
-retrieved text - verify):` and never with fabricated citations.
+retrieved text - verify):`. The **citation critic** then strips or rewrites any
+Article numbers in the draft that do not appear in the retrieved passages.
+
+## Conversational features
+
+### Query rewrite (`QUERY_REWRITE=1`)
+
+When chat history is present, a follow-up is rewritten into a standalone retrieval
+query (e.g. "what are its exceptions?" → "What are the exceptions to Article 21?").
+Single-shot questions skip the rewriter. The CLI and Streamlit UI show the rewritten
+query when it differs from the user's message.
+
+### Citation critic (`CRITIC_ENABLED=1`, `CRITIC_MAX_REWRITES=2`)
+
+After the LLM draft, the critic checks every cited Article against the retrieved
+passages. Up to two LLM rewrite attempts remove ungrounded citations; if citations
+are still ungrounded, a safe fallback answer is returned (grounded excerpt + disclaimer).
+Disable with `--no-critic` (CLI) or the sidebar toggle (UI).
+
+### Streaming
+
+The Streamlit UI runs retrieval, drafting, and the critic eagerly, then streams
+the approved answer word-by-word. Retrieved passages and source Articles persist in
+the chat for inspection.
 
 ## Results
 
@@ -70,8 +100,8 @@ The cross-encoder reranker lifts Hit@1 from 0.74 to **0.94** and MRR to **0.968*
 hybrid retrieval pushes Recall@K to **1.00** (the naive index backstops anything
 the structured chunker mis-segments).
 
-**Answer quality** (`--with-llm --judge qwen2.5:7b-instruct`, the full production
-pipeline) over all **34 questions** (factual / scenario / negative):
+**Answer quality** (`--with-llm --judge qwen2.5:7b-instruct`) over all **34 questions**
+(factual / scenario / negative):
 
 | metric | score |
 |--------|-------|
@@ -82,8 +112,13 @@ pipeline) over all **34 questions** (factual / scenario / negative):
 | LLM-judge correctness (1–5) | **4.09** |
 | LLM-judge groundedness (1–5) | **4.62** |
 
+> **Note:** These answer scores are from a **pre-critic** eval run. The production
+> pipeline now includes the citation critic. Re-run
+> `python -m backend.evaluate --with-llm` to measure post-critic impact (expect
+> higher faithfulness; some answers may be thinner when retrieval misses).
+
 Every `--with-llm` run writes a full transcript to `eval/runs/`. See
-[Limitations](#limitations) for the one known retrieval edge case (Article 280).
+[Limitations](#limitations) for known edge cases.
 
 ## Layout
 
@@ -100,8 +135,14 @@ constitution-rag/
 │   ├── embeddings.py     # bge-base embedding backend
 │   ├── rerank.py         # bge-reranker cross-encoder
 │   ├── retrieve.py       # hybrid retrieve + rerank
-│   └── query.py          # answer() with graded prompt (+ CLI)
-├── ui/app.py             # streamlit chat (hybrid/rerank toggles)
+│   ├── citations.py      # Article citation parsing / grounding checks
+│   ├── critic.py         # post-generation citation faithfulness critic
+│   ├── evaluate.py       # retrieval + answer eval harness
+│   └── query.py          # answer() with rewrite, critic, graded prompt (+ CLI)
+├── eval/
+│   ├── questions.json    # labeled eval set (34 questions)
+│   └── runs/             # JSON transcripts from --with-llm runs
+├── ui/app.py             # Streamlit chat (hybrid / rerank / critic toggles)
 ├── scripts/
 │   ├── Modelfile.saul    # Ollama Modelfile for SaulLM-7B
 │   └── setup_saul.sh     # download GGUF + `ollama create`
@@ -150,19 +191,20 @@ python -m backend.dump --article 21
 # 2. Build both vector collections (uses bge-base embeddings).
 python -m backend.ingest                 # --mode naive|structured|both, --force
 
-# 3. Ask questions (hybrid + rerank by default).
-python -m backend.query                  # add --show to see retrieved passages
+# 3. Ask questions (hybrid + rerank + rewrite + critic by default).
+python -m backend.query                  # multi-turn CLI; add --show for passages
+python -m backend.query --no-critic      # disable citation critic
 python -m backend.query --no-hybrid --strategy structured
 python -m backend.query --no-rerank
 
-# 4. Web UI.
+# 4. Web UI (streaming chat, example prompts, sidebar toggles).
 streamlit run ui/app.py
 
 # 5. Measure retrieval quality across configs (structured/naive/hybrid/+rerank).
 python -m backend.evaluate                # Hit@1/3/5, MRR, Recall@K
 python -m backend.evaluate --k 10 --verbose
 
-# 6. Answer-level eval (runs the LLM): citation/faithfulness/keyword/abstention.
+# 6. Answer-level eval (runs the full pipeline): citation/faithfulness/keyword/abstention.
 python -m backend.evaluate --with-llm
 python -m backend.evaluate --with-llm --judge qwen2.5:7b-instruct
 ```
@@ -177,8 +219,8 @@ no LLM): Hit@1/3/5, MRR, Recall@K per config. Chunks are credited by *character
 position* (via the structured article spans), so naive and structured are judged
 fairly. Use it to tune `TOP_N`, `RERANK_*`, hybrid on/off with evidence.
 
-**Answer eval** (`--with-llm`) runs the production pipeline and scores the
-generated answers:
+**Answer eval** (`--with-llm`) runs the production pipeline (rewrite + critic when
+enabled) and scores the generated answers:
 
 - **citation_hit** — does the answer cite the expected Article?
 - **faithfulness** — every Article it cites must be in the retrieved passages
@@ -197,6 +239,8 @@ answers, metrics, judge notes) to `eval/runs/run_<timestamp>.json` for review.
 - Embeddings: `EMBEDDING_MODEL`, `EMBED_DEVICE`, `EMBED_BATCH`
   (changing the model requires re-running `backend.ingest`).
 - Chunking: `CHUNK_SIZE`, `CHUNK_OVERLAP`, `MAX_ARTICLE_CHARS`.
+- Chat: `QUERY_REWRITE`, `CHAT_HISTORY_TURNS`.
+- Critic: `CRITIC_ENABLED`, `CRITIC_MAX_REWRITES`.
 - LLM: `OLLAMA_MODEL`, `OLLAMA_HOST`.
 
 ## Limitations
@@ -206,10 +250,23 @@ answers, metrics, judge notes) to `eval/runs/run_<timestamp>.json` for review.
 - **Known retrieval edge case.** For "*which body* recommends distribution of
   taxes" the embedder favours the tax-distribution Articles (269/270) over the
   Finance Commission (280), so that one answer can cite a neighbour. Tracked in
-  the eval (it's the single non-clean case in the results above).
+  the eval (it's the single non-clean case in the retrieval results above).
+- **Critic fallback.** When rewrites fail to remove ungrounded citations, the
+  critic returns a thin safe excerpt instead of a full explanatory answer.
+- **Rewrite anchoring.** Multi-topic compare questions in a follow-up can be
+  rewritten toward the wrong Article if the prior turn mentioned one (e.g.
+  comparing emergency types → anchored to Article 359).
+- **Chunking metadata.** Occasional mis-tagged Article numbers in structured
+  chunks (known ingest edge case).
 - **Self-judging caveat.** The judge scores above use the same model family that
   produced the answers; use a different `--judge` model for a stricter signal.
 - Not legal advice — this is a retrieval/IR project over the constitutional text.
+
+## Roadmap
+
+- **MCP server (planned)** — expose constitution search (and optionally the full
+  answer pipeline) as [Model Context Protocol](https://modelcontextprotocol.io) tools
+  for Cursor, Claude Desktop, and other MCP hosts.
 
 ## Notes
 
